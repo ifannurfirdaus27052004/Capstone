@@ -230,6 +230,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         preferences.remove("statIp");
         Serial.println("[NETWORK] Memori Jaringan Dibersihkan. Memicu Restart...");
         triggerRestart();
+    }
 }
 
 // =================================================================
@@ -339,7 +340,7 @@ void loop() {
     webSocket.loop();
     updateWifiLed();
 
-    unsigned long intervalSekarang = (statusBacaan == "MEMBACA") ? readIntervalAktif : readIntervalIdle;
+    unsigned long intervalSekarang = isReading ? readIntervalAktif : readIntervalIdle;
 
     if (millis() - lastReadTime >= intervalSekarang) {
         lastReadTime = millis();
