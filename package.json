@@ -1,5 +1,5 @@
 {
-  "name": "smart-relay-dashboard",
+  "name": "fruit-maturity-dashboard",
   "version": "1.0.0",
   "description": "Dashboard & Socket.IO bridge untuk sistem klasifikasi kematangan buah berbasis sensor gas (ESP32)",
   "main": "server.js",

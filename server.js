@@ -23,7 +23,48 @@ const io = new Server(server, {
     cors: { origin: "*" }
 });
 
-const PORT = process.env.PORT || 3000;
+function membershipRendah(x, batasBawah, batasAtas) {
+    if (x <= batasBawah) return 1.0;
+    if (x >= batasAtas) return 0.0;
+    return (batasAtas - x) / (batasAtas - batasBawah);
+}
+
+function membershipTinggi(x, batasBawah, batasAtas) {
+    if (x <= batasBawah) return 0.0;
+    if (x >= batasAtas) return 1.0;
+    return (x - batasBawah) / (batasAtas - batasBawah);
+}
+
+function computeFuzzyClassification(data) {
+    const mq2 = typeof data.mq2_raw === 'number' ? data.mq2_raw : data.mq2;
+    const mq3 = typeof data.mq3_raw === 'number' ? data.mq3_raw : data.mq3;
+    const mq5 = typeof data.mq5_raw === 'number' ? data.mq5_raw : data.mq5;
+    const tgs = typeof data.tgs_raw === 'number' ? data.tgs_raw : data.tgs;
+
+    if ([mq2, mq3, mq5, tgs].some((v) => typeof v !== 'number')) {
+        return null;
+    }
+
+    const mq3Tinggi = membershipTinggi(mq3, 800.0, 2200.0);
+    const mq2Tinggi = membershipTinggi(mq2, 1000.0, 2500.0);
+    const mq5Tinggi = membershipTinggi(mq5, 1000.0, 2500.0);
+    const tgsRendah = membershipRendah(tgs, 1200.0, 2800.0);
+
+    const skor = (mq3Tinggi * 40.0) + (mq2Tinggi * 20.0) +
+                 (mq5Tinggi * 20.0) + (tgsRendah * 20.0);
+
+    let klasifikasi;
+    if (skor < 35.0) klasifikasi = 'Mentah';
+    else if (skor < 70.0) klasifikasi = 'Setengah Matang';
+    else klasifikasi = 'Matang';
+
+    return {
+        klasifikasi,
+        skor: Number(skor.toFixed(1))
+    };
+}
+
+const PORT = process.env.PORT || 4000;
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -47,6 +88,17 @@ io.on("connection", (socket) => {
 
     // ---- DARI ESP32: data telemetri sensor + status pompa ----
     socket.on("espData", (data) => {
+        const classification = computeFuzzyClassification(data);
+        if (classification) {
+            data.klasifikasi = classification.klasifikasi;
+            data.skor = classification.skor;
+        }
+
+        data.mq2 = data.mq2_raw ?? data.mq2;
+        data.mq3 = data.mq3_raw ?? data.mq3;
+        data.mq5 = data.mq5_raw ?? data.mq5;
+        data.tgs = data.tgs_raw ?? data.tgs;
+
         lastData = { ...lastData, ...data, connected: true };
         // Broadcast ke SEMUA client lain (dashboard browser)
         socket.broadcast.emit("espData", lastData);

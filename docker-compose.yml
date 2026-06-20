@@ -5,10 +5,10 @@ services:
     container_name: smart-relay
     restart: unless-stopped
     ports:
-      # Ubah "3000" di sisi kiri jika port 3000 di host sudah dipakai
-      - "3000:3000"
+      # Ubah "4000" di sisi kiri jika port 4000 di host sudah dipakai
+      - "4000:4000"
     environment:
-      - PORT=3000
+      - PORT=4000
     # Jika reverse proxy CasaOS (mis. Nginx Proxy Manager) sudah menangani
-    # domain smart-relay.ijuloss.my.id dan SSL, arahkan proxy tersebut ke
-    # container ini di port 3000. Tidak perlu konfigurasi SSL di sini.
+    # domain fruit-maturity.ijuloss.my.id dan SSL, arahkan proxy tersebut ke
+    # container ini di port 4000. Tidak perlu konfigurasi SSL di sini.
