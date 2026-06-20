@@ -88,6 +88,8 @@ io.on("connection", (socket) => {
 
     // ---- DARI ESP32: data telemetri sensor + status pompa ----
     socket.on("espData", (data) => {
+        console.log("[ESP] espData received:", data);
+
         const classification = computeFuzzyClassification(data);
         if (classification) {
             data.klasifikasi = classification.klasifikasi;
@@ -108,8 +110,20 @@ io.on("connection", (socket) => {
     // payload: { cmd: "setPompa1", data: { state: true } }
     socket.on("dashboardCmd", (payload) => {
         console.log("[CMD] Dari dashboard:", payload);
-        // Teruskan ke semua client (ESP32 akan memprosesnya)
-        io.emit("serverToEsp", payload);
+        if (!payload || typeof payload.cmd !== 'string') return;
+
+        // Build command object matching ArduinoJson ESP32 expectations
+        const cmdObj = {
+            cmd: payload.cmd,
+            data: payload.data || {}
+        };
+
+        // Emit as Socket.IO frame with proper JSON format for ESP32
+        // Format: 42[["serverToEsp", {cmd, data}]]
+        const frameData = JSON.stringify(["serverToEsp", cmdObj]);
+        io.emit("serverToEsp", "42" + frameData);
+        
+        console.log("[CMD] Sent to ESP32:", "42" + frameData);
     });
 
     socket.on("disconnect", () => {

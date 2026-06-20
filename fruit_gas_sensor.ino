@@ -2,7 +2,9 @@
 #include <WiFiManager.h>
 #include <Preferences.h>
 #include <WebSocketsClient.h>
+#include <ArduinoJson.h>
 #include <ArduinoOTA.h>
+#include <WiFiClientSecure.h>
 #include "ota_config.h"
 
 // =================================================================
@@ -140,92 +142,84 @@ void setupArduinoOTA() {
 }
 
 // =================================================================
-// WEBSOCKET / SOCKET.IO EVENT HANDLER
+// WEBSOCKET / SOCKET.IO EVENT HANDLER (menggunakan ArduinoJson)
 // =================================================================
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     if (type == WStype_DISCONNECTED) {
         socketIoReady = false;
+        Serial.println("[WS] Disconnected");
+        return;
+    }
+    if (type == WStype_CONNECTED) {
+        Serial.printf("[WS] Connected to %s:%d\n", ws_host, ws_port);
         return;
     }
     if (type != WStype_TEXT || length == 0) return;
 
-    const char* msg = (const char*)payload;
-    if (msg[0] == '0') {
+    String msg = String((char*)payload);
+    Serial.printf("[WS] RX (%d bytes): %s\n", length, msg.c_str());
+
+    // Socket.IO Handshake: "0" → respond "40"
+    if (msg.startsWith("0")) {
         webSocket.sendTXT("40");
         socketIoReady = true;
+        Serial.println("[WS] Socket.IO handshake completed");
         return;
     }
-    if (length == 1 && msg[0] == '2') {
+
+    // Socket.IO Keepalive: "2" → respond "3"
+    if (msg == "2") {
         webSocket.sendTXT("3");
         return;
     }
 
-    const char prefix[] = "42[\"serverToEsp\",\"";
-    const size_t prefixLen = sizeof(prefix) - 1;
-    if (length <= prefixLen) return;
-    if (strncmp(msg, prefix, prefixLen) != 0) return;
+    // Socket.IO Event frame: "42" prefix = event message
+    if (!msg.startsWith("42")) return;
 
-    const char* cmdStart = msg + prefixLen;
-    const char* cmdEnd = strstr(cmdStart, "\"]");
-    if (!cmdEnd) return;
+    msg.remove(0, 2);  // Remove "42" prefix
+    Serial.printf("[WS] After remove prefix: %s\n", msg.c_str());
 
-    bool setP1 = false;
-    bool setP2 = false;
-    bool doSetP1 = false;
-    bool doSetP2 = false;
-    bool doSetAllOff = false;
-    bool doApplyNetwork = false;
-    bool doResetWifi = false;
-    char ipBuf[40] = "";
-    char gwBuf[40] = "";
+    JsonDocument doc;
+    if (deserializeJson(doc, msg)) {
+        Serial.println("[WS] JSON parse failed!");
+        return;
+    }
 
-    const char* sep = strchr(cmdStart, '|');
-    size_t cmdLen = sep ? (size_t)(sep - cmdStart) : (size_t)(cmdEnd - cmdStart);
-    if (cmdLen == 0 || cmdLen > 40) return;
+    // Check event name: serverToEsp
+    if (doc[0].as<String>() != "serverToEsp") {
+        Serial.printf("[WS] Event bukan serverToEsp: %s\n", doc[0].as<String>().c_str());
+        return;
+    }
 
-    char cmdBuf[41];
-    memcpy(cmdBuf, cmdStart, cmdLen);
-    cmdBuf[cmdLen] = '\0';
+    // doc[1] contains the command payload
+    String cmd = doc[1]["cmd"].as<String>();
+    Serial.printf("[WS] CMD: %s\n", cmd.c_str());
 
-    const char* arg = sep ? sep + 1 : NULL;
-
-    if (strcmp(cmdBuf, "setPompa1") == 0 && arg) {
-        doSetP1 = true;
-        setP1 = (arg[0] == '1' || (arg[0] == 't' && arg[1] == 'r'));
-    } else if (strcmp(cmdBuf, "setPompa2") == 0 && arg) {
-        doSetP2 = true;
-        setP2 = (arg[0] == '1' || (arg[0] == 't' && arg[1] == 'r'));
-    } else if (strcmp(cmdBuf, "setAllOff") == 0) {
-        doSetAllOff = true;
-    } else if (strcmp(cmdBuf, "applyNetwork") == 0 && arg) {
-        doApplyNetwork = true;
-        const char* sep2 = strchr(arg, '|');
-        if (sep2) {
-            size_t ipLen = sep2 - arg;
-            if (ipLen < sizeof(ipBuf)) {
-                memcpy(ipBuf, arg, ipLen);
-                ipBuf[ipLen] = '\0';
-            }
-            strncpy(gwBuf, sep2 + 1, sizeof(gwBuf) - 1);
-            gwBuf[sizeof(gwBuf) - 1] = '\0';
-        } else {
-            strncpy(ipBuf, arg, sizeof(ipBuf) - 1);
-            ipBuf[sizeof(ipBuf) - 1] = '\0';
+    if (cmd == "setPompa1") {
+        bool state = doc[1]["data"]["state"] | false;
+        setPompa1(state);
+        Serial.printf("[WS] setPompa1 → %s\n", state ? "ON" : "OFF");
+    }
+    else if (cmd == "setPompa2") {
+        bool state = doc[1]["data"]["state"] | false;
+        setPompa2(state);
+        Serial.printf("[WS] setPompa2 → %s\n", state ? "ON" : "OFF");
+    }
+    else if (cmd == "setAllOff") {
+        semuaPompaOff();
+        Serial.println("[WS] setAllOff executed");
+    }
+    else if (cmd == "applyNetwork") {
+        String ip = doc[1]["data"]["ip"].as<String>();
+        String gw = doc[1]["data"]["gw"].as<String>();
+        if (ip.length() > 0) {
+            preferences.putString("statIp", ip);
+            preferences.putString("statGw", gw);
+            Serial.printf("[NETWORK] Konfigurasi Baru Disimpan: IP=%s GW=%s. Memicu Restart...\n", ip.c_str(), gw.c_str());
+            triggerRestart();
         }
-    } else if (strcmp(cmdBuf, "resetWifi") == 0) {
-        doResetWifi = true;
     }
-
-    if (doSetP1) setPompa1(setP1);
-    if (doSetP2) setPompa2(setP2);
-    if (doSetAllOff) semuaPompaOff();
-    if (doApplyNetwork) {
-        preferences.putString("statIp", ipBuf);
-        preferences.putString("statGw", gwBuf);
-        Serial.println("[NETWORK] Konfigurasi Baru Disimpan. Memicu Restart...");
-        triggerRestart();
-    }
-    if (doResetWifi) {
+    else if (cmd == "resetWifi") {
         wm.resetSettings();
         preferences.remove("statIp");
         Serial.println("[NETWORK] Memori Jaringan Dibersihkan. Memicu Restart...");
@@ -234,25 +228,30 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 }
 
 // =================================================================
-// KIRIM DATA TELEMETRI KE SERVER
+// KIRIM DATA TELEMETRI KE SERVER (menggunakan ArduinoJson)
 // =================================================================
 void kirimDataKeServer() {
-    if (!socketIoReady) return;
+    if (!socketIoReady) {
+        Serial.println("[WS] Socket.IO not ready, skip send");
+        return;
+    }
 
-    const char* status = isReading ? "MEMBACA" : "IDLE";
-    const char* p1 = pompa1On ? "ON" : "OFF";
-    const char* p2 = pompa2On ? "ON" : "OFF";
+    JsonDocument doc;
+    doc["mq2_raw"] = rawMQ2;
+    doc["mq3_raw"] = rawMQ3;
+    doc["mq5_raw"] = rawMQ5;
+    doc["tgs_raw"] = rawTGS;
+    doc["statusBacaan"] = isReading ? "MEMBACA" : "IDLE";
+    doc["pompa1"] = pompa1On ? "ON" : "OFF";
+    doc["pompa2"] = pompa2On ? "ON" : "OFF";
 
-    char payload[256];
-    int len = snprintf(payload, sizeof(payload),
-        "{\"mq2_raw\":%d,\"mq3_raw\":%d,\"mq5_raw\":%d,\"tgs_raw\":%d,"
-        "\"statusBacaan\":\"%s\",\"pompa1\":\"%s\",\"pompa2\":\"%s\"}",
-        rawMQ2, rawMQ3, rawMQ5, rawTGS, status, p1, p2);
-    if (len <= 0) return;
-
-    char message[300];
-    snprintf(message, sizeof(message), "42[\"espData\",%s]", payload);
-    webSocket.sendTXT(message);
+    String jsonData;
+    serializeJson(doc, jsonData);
+    
+    String frame = "42[\"espData\"," + jsonData + "]";
+    webSocket.sendTXT(frame);
+    
+    Serial.printf("[WS] Sent espData: %s\n", jsonData.c_str());
 }
 
 // =================================================================
@@ -311,6 +310,7 @@ void setup() {
     }
 
     const char* socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
+    Serial.printf("[WS] Connecting to %s:%d%s\n", ws_host, ws_port, socketIoUrl);
     webSocket.begin(ws_host, ws_port, socketIoUrl);
 
     webSocket.onEvent(webSocketEvent);
