@@ -1,8 +1,8 @@
 services:
-  smart-relay:
+  smart-fruit:
     build: .
-    image: smart-relay:latest
-    container_name: smart-relay
+    image: smart-fruit:latest
+    container_name: smart-fruit
     restart: unless-stopped
     ports:
       # Ubah "4000" di sisi kiri jika port 4000 di host sudah dipakai
