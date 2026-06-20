@@ -83,51 +83,28 @@ let lastData = {
 io.on("connection", (socket) => {
     console.log(`[CONNECT] Client baru: ${socket.id}`);
 
-    // Kirim state terakhir ke client yang baru connect (browser ataupun ESP32)
+    // Mengirim state terakhir (lastData) ke client yang baru terkoneksi [cite: 28, 37]
     socket.emit("espData", lastData);
 
-    // ---- DARI ESP32: data telemetri sensor + status pompa ----
+    // 1. Menerima data dari ESP32 
     socket.on("espData", (data) => {
-        console.log("[ESP] espData received:", data);
-
-        const classification = computeFuzzyClassification(data);
-        if (classification) {
-            data.klasifikasi = classification.klasifikasi;
-            data.skor = classification.skor;
-        }
-
-        data.mq2 = data.mq2_raw ?? data.mq2;
-        data.mq3 = data.mq3_raw ?? data.mq3;
-        data.mq5 = data.mq5_raw ?? data.mq5;
-        data.tgs = data.tgs_raw ?? data.tgs;
-
-        lastData = { ...lastData, ...data, connected: true };
-        // Broadcast ke SEMUA client lain (dashboard browser)
+        // Update state in-memory [cite: 28, 37]
+        lastData = { ...lastData, ...data };
+        
+        // Teruskan data ini ke SEMUA client (browser dashboard) [cite: 26]
+        // menggunakan broadcast agar tidak dikirim balik ke ESP32 pengirim
         socket.broadcast.emit("espData", lastData);
     });
 
-    // ---- DARI DASHBOARD BROWSER: command tombol pompa ----
-    // payload: { cmd: "setPompa1", data: { state: true } }
-    socket.on("dashboardCmd", (payload) => {
-        console.log("[CMD] Dari dashboard:", payload);
-        if (!payload || typeof payload.cmd !== 'string') return;
-
-        // Build command object matching ArduinoJson ESP32 expectations
-        const cmdObj = {
-            cmd: payload.cmd,
-            data: payload.data || {}
-        };
-
-        // Emit as Socket.IO frame with proper JSON format for ESP32
-        // Format: 42[["serverToEsp", {cmd, data}]]
-        const frameData = JSON.stringify(["serverToEsp", cmdObj]);
-        io.emit("serverToEsp", "42" + frameData);
-        
-        console.log("[CMD] Sent to ESP32:", "42" + frameData);
+    // 2. Menerima perintah (command) dari Browser Dashboard [cite: 26]
+    socket.on("dashboardCmd", (cmd) => {
+        console.log(`[CMD] Perintah dari Dashboard:`, cmd);
+        // Teruskan ke semua client sebagai "serverToEsp" (ESP32 akan merespon ini) [cite: 26]
+        io.emit("serverToEsp", cmd);
     });
 
     socket.on("disconnect", () => {
-        console.log(`[DISCONNECT] Client: ${socket.id}`);
+        console.log(`[DISCONNECT] Client terputus: ${socket.id}`);
     });
 });
 

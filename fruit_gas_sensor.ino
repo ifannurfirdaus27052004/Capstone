@@ -20,7 +20,7 @@ int ws_port = default_ws_port;
 #define MQ2_PIN     35
 #define MQ3_PIN     34
 #define MQ5_PIN     32
-#define TGS2602_PIN 25
+#define TGS2602_PIN 33
 
 // ======================
 // PIN RELAY
@@ -49,6 +49,11 @@ bool socketIoReady = false;
 
 bool pendingRestart = false;
 unsigned long restartTime = 0;
+
+// WiFi Reset Timeout: 10 detik untuk reconnect, jika gagal masuk AP mode
+bool wifiResetPending = false;
+unsigned long wifiResetStartTime = 0;
+const unsigned long WIFI_RECONNECT_TIMEOUT = 10000; // 10 detik
 
 // =================================================================
 // KONTROL POMPA (MANUAL DARI DASHBOARD, SALING EXCLUSIVE)
@@ -119,6 +124,7 @@ void triggerRestart() {
 
 void setupArduinoOTA() {
     ArduinoOTA.setHostname("fruitmaturity-esp32");
+    ArduinoOTA.setPassword("buahpintar123");
 
     ArduinoOTA.onStart([]() {
         Serial.println("OTA: Start");
@@ -245,10 +251,13 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         }
     }
     else if (cmd == "resetWifi") {
+        Serial.println("[NETWORK] Perintah reset WiFi diterima. Siap reconnect dalam 10 detik...");
         wm.resetSettings();
         preferences.remove("statIp");
-        Serial.println("[NETWORK] Memori Jaringan Dibersihkan. Memicu Restart...");
-        triggerRestart();
+        preferences.remove("statGw");
+        wifiResetPending = true;
+        wifiResetStartTime = millis();
+        Serial.println("[NETWORK] Memulai proses reconnect WiFi dengan timeout 10 detik");
     }
 }
 
@@ -339,20 +348,16 @@ void setup() {
     webSocket.setReconnectInterval(3000);
 
     const char* socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
-    Serial.printf("[WS] Connecting to %s:%d%s\n", ws_host, ws_port, socketIoUrl);
     
-    // Use SSL for HTTPS domain (reverse proxy at port 4000 with SSL)
-    setupWebSocketSSL();
-    
-    if (ws_port == 443) {
-        Serial.println("[WS] Using SSL connection (port 443)");
-        webSocket.beginSSL(ws_host, ws_port, socketIoUrl);
-    } else if (strstr(ws_host, "ijuloss.my.id")) {
-        // If domain suggests reverse proxy with SSL, try SSL first
-        Serial.println("[WS] Domain suggests SSL, trying SSL connection");
+    // Perbaikan Logika SSL:
+    // Jika port 443 ATAU menggunakan domain ijuloss.my.id, paksa gunakan SSL dan port 443.
+    if (ws_port == 443 || strstr(ws_host, "ijuloss.my.id")) {
+        Serial.println("[WS] Menggunakan koneksi SSL (via Reverse Proxy)");
+        // Override port ke 443 jika user salah memasukkan port 4000 di captive portal
+        ws_port = 443; 
         webSocket.beginSSL(ws_host, ws_port, socketIoUrl);
     } else {
-        Serial.println("[WS] Using plain HTTP connection");
+        Serial.printf("[WS] Menggunakan HTTP biasa ke port %d\n", ws_port);
         webSocket.begin(ws_host, ws_port, socketIoUrl);
     }
     
@@ -372,11 +377,48 @@ void updateWifiLed() {
     }
 }
 
+void handleWifiResetTimeout() {
+    if (!wifiResetPending) return;
+
+    unsigned long elapsedTime = millis() - wifiResetStartTime;
+
+    // Coba reconnect jika dalam 10 detik
+    if (elapsedTime < WIFI_RECONNECT_TIMEOUT) {
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("[NETWORK] ✓ WiFi berhasil terhubung dalam timeout!");
+            wifiResetPending = false;
+            // Reconnect ke WebSocket
+            webSocket.disconnect();
+            delay(500);
+            const char* socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
+            if (ws_port == 443 || strstr(ws_host, "ijuloss.my.id")) {
+                webSocket.beginSSL(ws_host, ws_port, socketIoUrl);
+            } else {
+                webSocket.begin(ws_host, ws_port, socketIoUrl);
+            }
+        }
+    } else {
+        // Sudah 10 detik, jika masih belum terhubung, masuk AP mode
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[NETWORK] ⚠ Timeout 10 detik tercapai. Tidak bisa terhubung ke WiFi. Masuk mode Access Point...");
+            wifiResetPending = false;
+            // Mulai WiFiManager portal
+            wm.startConfigPortal("FruitSensor_AP");
+        } else {
+            // Sudah terhubung, stop timer
+            wifiResetPending = false;
+        }
+    }
+}
+
 void loop() {
     // Penanganan Restart Tertunda Tanpa Fungsi Blocking Delay
     if (pendingRestart && (millis() - restartTime >= 1000)) {
         ESP.restart();
     }
+
+    // Handle WiFi reset dengan timeout 10 detik
+    handleWifiResetTimeout();
 
     webSocket.loop();  // CRITICAL: call frequently for event callbacks
     ArduinoOTA.handle();  // OTA must loop continuously
