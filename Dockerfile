@@ -8,7 +8,7 @@ RUN npm install --omit=dev
 
 # Salin source code & file statis dashboard
 COPY server.js ./
-COPY public ./public
+COPY index.html ./
 
 EXPOSE 4000
 

@@ -66,7 +66,7 @@ function computeFuzzyClassification(data) {
 
 const PORT = process.env.PORT || 4000;
 
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname)));
 
 // State terakhir in-memory (hilang saat restart, sesuai kebutuhan)
 let lastData = {
