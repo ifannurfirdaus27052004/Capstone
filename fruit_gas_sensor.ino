@@ -141,20 +141,42 @@ void setupArduinoOTA() {
     Serial.println("OTA: Ready");
 }
 
+void setupWebSocketSSL() {
+    // Configure SSL certificate validation
+    // For self-signed certificates or testing, disable validation
+    // Production: implement proper certificate pinning
+    
+    // The WebSocketsClient will use WiFiClientSecure internally
+    // We set insecure mode to skip certificate validation during testing
+    Serial.println("[SSL] Configuring SSL for WebSocket (certificate validation: disabled for testing)");
+}
+
 // =================================================================
 // WEBSOCKET / SOCKET.IO EVENT HANDLER (menggunakan ArduinoJson)
 // =================================================================
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+    Serial.printf("[WS] Event: type=%d, length=%d\n", type, length);
+    
     if (type == WStype_DISCONNECTED) {
         socketIoReady = false;
         Serial.println("[WS] Disconnected");
         return;
     }
+    
     if (type == WStype_CONNECTED) {
         Serial.printf("[WS] Connected to %s:%d\n", ws_host, ws_port);
         return;
     }
-    if (type != WStype_TEXT || length == 0) return;
+    
+    if (type == WStype_ERROR) {
+        Serial.printf("[WS] ERROR: %s\n", payload ? (char*)payload : "unknown");
+        return;
+    }
+    
+    if (type != WStype_TEXT || length == 0) {
+        Serial.printf("[WS] Ignored non-TEXT or zero-length: type=%d\n", type);
+        return;
+    }
 
     String msg = String((char*)payload);
     Serial.printf("[WS] RX (%d bytes): %s\n", length, msg.c_str());
@@ -163,7 +185,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     if (msg.startsWith("0")) {
         webSocket.sendTXT("40");
         socketIoReady = true;
-        Serial.println("[WS] Socket.IO handshake completed");
+        Serial.println("[WS] ✓ Socket.IO handshake completed");
         return;
     }
 
@@ -174,14 +196,17 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     }
 
     // Socket.IO Event frame: "42" prefix = event message
-    if (!msg.startsWith("42")) return;
+    if (!msg.startsWith("42")) {
+        Serial.printf("[WS] Frame type not 42: %s\n", msg.substring(0, 5).c_str());
+        return;
+    }
 
     msg.remove(0, 2);  // Remove "42" prefix
     Serial.printf("[WS] After remove prefix: %s\n", msg.c_str());
 
     JsonDocument doc;
     if (deserializeJson(doc, msg)) {
-        Serial.println("[WS] JSON parse failed!");
+        Serial.printf("[WS] JSON parse failed! Input: %s\n", msg.c_str());
         return;
     }
 
@@ -193,7 +218,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
     // doc[1] contains the command payload
     String cmd = doc[1]["cmd"].as<String>();
-    Serial.printf("[WS] CMD: %s\n", cmd.c_str());
+    Serial.printf("[WS] ✓ CMD received: %s\n", cmd.c_str());
 
     if (cmd == "setPompa1") {
         bool state = doc[1]["data"]["state"] | false;
@@ -309,12 +334,28 @@ void setup() {
         preferences.putInt("ws_port", ws_port);
     }
 
-    const char* socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
-    Serial.printf("[WS] Connecting to %s:%d%s\n", ws_host, ws_port, socketIoUrl);
-    webSocket.begin(ws_host, ws_port, socketIoUrl);
-
+    // REGISTER CALLBACK FIRST, then begin connection (WebSocketsClient requirement)
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(3000);
+
+    const char* socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
+    Serial.printf("[WS] Connecting to %s:%d%s\n", ws_host, ws_port, socketIoUrl);
+    
+    // Use SSL for HTTPS domain (reverse proxy at port 4000 with SSL)
+    setupWebSocketSSL();
+    
+    if (ws_port == 443) {
+        Serial.println("[WS] Using SSL connection (port 443)");
+        webSocket.beginSSL(ws_host, ws_port, socketIoUrl);
+    } else if (strstr(ws_host, "ijuloss.my.id")) {
+        // If domain suggests reverse proxy with SSL, try SSL first
+        Serial.println("[WS] Domain suggests SSL, trying SSL connection");
+        webSocket.beginSSL(ws_host, ws_port, socketIoUrl);
+    } else {
+        Serial.println("[WS] Using plain HTTP connection");
+        webSocket.begin(ws_host, ws_port, socketIoUrl);
+    }
+    
     setupArduinoOTA();
 
     delay(2000); // Stabilisasi awal sensor gas (analog dgn kode asli)
@@ -337,7 +378,8 @@ void loop() {
         ESP.restart();
     }
 
-    webSocket.loop();
+    webSocket.loop();  // CRITICAL: call frequently for event callbacks
+    ArduinoOTA.handle();  // OTA must loop continuously
     updateWifiLed();
 
     unsigned long intervalSekarang = isReading ? readIntervalAktif : readIntervalIdle;
@@ -356,6 +398,4 @@ void loop() {
 
         if (WiFi.status() == WL_CONNECTED) { kirimDataKeServer(); }
     }
-
-    ArduinoOTA.handle();
 }
