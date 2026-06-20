@@ -10,5 +10,5 @@ services:
     environment:
       - PORT=4000
     # Jika reverse proxy CasaOS (mis. Nginx Proxy Manager) sudah menangani
-    # domain fruit-maturity.ijuloss.my.id dan SSL, arahkan proxy tersebut ke
+    # domain fruitmaturity.ijuloss.my.id dan SSL, arahkan proxy tersebut ke
     # container ini di port 4000. Tidak perlu konfigurasi SSL di sini.

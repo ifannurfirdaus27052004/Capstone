@@ -217,6 +217,7 @@ void setup() {
     digitalWrite(RELAY2, HIGH); // OFF (active LOW)
 
     pinMode(LED_WIFI, OUTPUT);
+    digitalWrite(LED_WIFI, HIGH); // Matikan LED saat belum terhubung
 
     preferences.begin("fruit-app", false);
 
@@ -281,6 +282,14 @@ void setup() {
 // =================================================================
 // LOOP
 // =================================================================
+void updateWifiLed() {
+    if (WiFi.status() == WL_CONNECTED) {
+        digitalWrite(LED_WIFI, LOW); // LED onboard biru menyala
+    } else {
+        digitalWrite(LED_WIFI, HIGH); // LED dimatikan
+    }
+}
+
 void loop() {
     // Penanganan Restart Tertunda Tanpa Fungsi Blocking Delay
     if (pendingRestart && (millis() - restartTime >= 1000)) {
@@ -288,6 +297,7 @@ void loop() {
     }
 
     webSocket.loop();
+    updateWifiLed();
 
     unsigned long intervalSekarang = (statusBacaan == "MEMBACA") ? readIntervalAktif : readIntervalIdle;
 
