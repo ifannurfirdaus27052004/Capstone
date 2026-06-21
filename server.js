@@ -19,9 +19,7 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 function membershipRendah(x, batasBawah, batasAtas) {
     if (x <= batasBawah) return 1.0;
@@ -40,80 +38,42 @@ function computeFuzzyClassification(data) {
     const mq3 = typeof data.mq3_raw === 'number' ? data.mq3_raw : data.mq3;
     const mq5 = typeof data.mq5_raw === 'number' ? data.mq5_raw : data.mq5;
     const tgs = typeof data.tgs_raw === 'number' ? data.tgs_raw : data.tgs;
-
-    if ([mq2, mq3, mq5, tgs].some((v) => typeof v !== 'number')) {
-        return null;
-    }
-
-    const mq3Tinggi = membershipTinggi(mq3, 800.0, 2200.0);
-    const mq2Tinggi = membershipTinggi(mq2, 1000.0, 2500.0);
-    const mq5Tinggi = membershipTinggi(mq5, 1000.0, 2500.0);
-    const tgsRendah = membershipRendah(tgs, 1200.0, 2800.0);
-
-    const skor = (mq3Tinggi * 40.0) + (mq2Tinggi * 20.0) +
-                 (mq5Tinggi * 20.0) + (tgsRendah * 20.0);
-
-    let klasifikasi;
-    if (skor < 35.0) klasifikasi = 'Mentah';
-    else if (skor < 70.0) klasifikasi = 'Setengah Matang';
-    else klasifikasi = 'Matang';
-
-    return {
-        klasifikasi,
-        skor: Number(skor.toFixed(1))
-    };
+    // Logika Fuzzy dapat ditambahkan di dalam blok ini 
 }
 
 const PORT = process.env.PORT || 4000;
-
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname)));
 
 // State terakhir in-memory (hilang saat restart, sesuai kebutuhan)
 let lastData = {
     mq2_raw: 0, mq3_raw: 0, mq5_raw: 0, tgs_raw: 0,
     mq2: 0, mq3: 0, mq5: 0, tgs: 0,
-    klasifikasi: "Menunggu Data...",
-    skor: 0,
-    statusBacaan: "IDLE",
-    pompa1: "OFF",
-    pompa2: "OFF",
+    klasifikasi: "Menunggu Data...", skor: 0,
+    statusBacaan: "IDLE", pompa1: "OFF", pompa2: "OFF",
     connected: false // status koneksi ESP32 ke server
 };
 
 io.on("connection", (socket) => {
     console.log(`[CONNECT] Client baru: ${socket.id}`);
 
-    // Kirim state terakhir ke client yang baru connect (browser ataupun ESP32)
+    // Mengirim state terakhir ke client dashboard yang baru connect
     socket.emit("espData", lastData);
 
-    // ---- DARI ESP32: data telemetri sensor + status pompa ----
+    // Menerima data telemetri dari ESP32
     socket.on("espData", (data) => {
-        const classification = computeFuzzyClassification(data);
-        if (classification) {
-            data.klasifikasi = classification.klasifikasi;
-            data.skor = classification.skor;
-        }
-
-        data.mq2 = data.mq2_raw ?? data.mq2;
-        data.mq3 = data.mq3_raw ?? data.mq3;
-        data.mq5 = data.mq5_raw ?? data.mq5;
-        data.tgs = data.tgs_raw ?? data.tgs;
-
         lastData = { ...lastData, ...data, connected: true };
-        // Broadcast ke SEMUA client lain (dashboard browser)
-        socket.broadcast.emit("espData", lastData);
+        // Broadcast data ke seluruh browser dashboard yang terkoneksi
+        io.emit("espData", lastData);
     });
 
-    // ---- DARI DASHBOARD BROWSER: command tombol pompa ----
-    // payload: { cmd: "setPompa1", data: { state: true } }
-    socket.on("dashboardCmd", (payload) => {
-        console.log("[CMD] Dari dashboard:", payload);
-        // Teruskan ke semua client (ESP32 akan memprosesnya)
-        io.emit("serverToEsp", payload);
+    // Menerima perintah kendali dari Dashboard (seperti kontrol pompa)
+    // dan meneruskannya ke ESP32 sebagai instruksi "serverToEsp"
+    socket.on("dashboardCmd", (cmdData) => {
+        io.emit("serverToEsp", cmdData);
     });
 
     socket.on("disconnect", () => {
-        console.log(`[DISCONNECT] Client: ${socket.id}`);
+        console.log(`[DISCONNECT] Client terputus: ${socket.id}`);
     });
 });
 
