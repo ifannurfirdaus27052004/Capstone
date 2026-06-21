@@ -23,6 +23,10 @@ const defaultData = {
 let lastData = { ...defaultData };
 let espSocketId = null; // Menyimpan ID spesifik milik ESP32
 
+// State untuk EMA Filter (mencegah fluktuasi nilai)
+let emaSensors = { mq2: null, mq3: null, mq5: null, tgs: null };
+const EMA_ALPHA = 0.15; // Faktor smoothing (semakin kecil = nilai semakin stabil namun lebih lambat merespon)
+
 // Fungsi mengubah detik menjadi format "0h 00m 00s"
 function formatUptime(seconds) {
     if (!seconds) return "0h 00m 00s";
@@ -124,7 +128,31 @@ io.on("connection", (socket) => {
         // Tandai bahwa socket ini adalah milik ESP32
         espSocketId = socket.id;
 
-        // Duplikasi untuk UI
+        // Terapkan EMA Filter untuk mencegah fluktuasi di web
+        if (data.statusBacaan === "MEMBACA") {
+            // Jika belum ada nilai EMA, inisialisasi dengan data raw pertama
+            if (emaSensors.mq2 === null) emaSensors.mq2 = data.mq2_raw;
+            if (emaSensors.mq3 === null) emaSensors.mq3 = data.mq3_raw;
+            if (emaSensors.mq5 === null) emaSensors.mq5 = data.mq5_raw;
+            if (emaSensors.tgs === null) emaSensors.tgs = data.tgs_raw;
+
+            // Kalkulasi EMA
+            emaSensors.mq2 = (EMA_ALPHA * data.mq2_raw) + ((1 - EMA_ALPHA) * emaSensors.mq2);
+            emaSensors.mq3 = (EMA_ALPHA * data.mq3_raw) + ((1 - EMA_ALPHA) * emaSensors.mq3);
+            emaSensors.mq5 = (EMA_ALPHA * data.mq5_raw) + ((1 - EMA_ALPHA) * emaSensors.mq5);
+            emaSensors.tgs = (EMA_ALPHA * data.tgs_raw) + ((1 - EMA_ALPHA) * emaSensors.tgs);
+
+            // Ganti data raw dengan nilai hasil filter (dibulatkan)
+            data.mq2_raw = Math.round(emaSensors.mq2);
+            data.mq3_raw = Math.round(emaSensors.mq3);
+            data.mq5_raw = Math.round(emaSensors.mq5);
+            data.tgs_raw = Math.round(emaSensors.tgs);
+        } else {
+            // Reset EMA saat sedang IDLE agar sampel buah baru tidak terpengaruh data sebelumnya
+            emaSensors = { mq2: null, mq3: null, mq5: null, tgs: null };
+        }
+
+        // Duplikasi untuk UI (UI sekarang menampilkan data yang sudah di-smooth)
         data.mq2 = data.mq2_raw;
         data.mq3 = data.mq3_raw;
         data.mq5 = data.mq5_raw;
@@ -166,6 +194,7 @@ io.on("connection", (socket) => {
             console.log("[SERVER] ESP32 Terputus!");
             espSocketId = null;
             lastData = { ...defaultData }; // Reset ke status awal
+            emaSensors = { mq2: null, mq3: null, mq5: null, tgs: null }; // Reset EMA filter
             io.emit("espData", lastData); // Paksa UI kembali ke status offline
         }
     });
