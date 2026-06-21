@@ -92,6 +92,7 @@
             color: var(--accent-green);
             display: inline-block;
             margin-right: 20px;
+            transition: color 0.4s ease;
         }
         .skor-teks {
             font-size: 16px;
@@ -234,12 +235,32 @@
         }
         .btn-sys:hover { background-color: #e8e0d0; }
 
-        /* Responsive */
+        .klasifikasi-wrapper {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+        }
+
+        /* Responsive Tablet (Max 768px) */
         @media (max-width: 768px) {
+            body { padding: 25px 15px; }
             .sensor-grid { grid-template-columns: 1fr 1fr; }
             .kontrol-grid { grid-template-columns: 1fr; }
             .header { flex-direction: column; align-items: flex-start; }
-            .status-indicator { margin-top: 10px; }
+            .status-indicator { margin-top: 12px; }
+            .klasifikasi-hasil { font-size: 42px; margin-right: 15px; }
+            .sys-buttons { flex-wrap: wrap; }
+            .btn-sys { flex: 1 1 100%; text-align: center; }
+        }
+
+        /* Responsive Mobile Phone (Max 480px) */
+        @media (max-width: 480px) {
+            .sensor-grid { grid-template-columns: 1fr; }
+            .header h1 { font-size: 26px; }
+            .klasifikasi-wrapper { flex-direction: column; align-items: flex-start; }
+            .klasifikasi-hasil { font-size: 36px; margin-bottom: 5px; }
+            .sys-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+            .sys-val { font-size: 14px; }
         }
     </style>
 </head>
@@ -259,7 +280,7 @@
 
     <div class="card">
         <div class="card-title">Hasil Klasifikasi</div>
-        <div style="display: flex; align-items: baseline;">
+        <div class="klasifikasi-wrapper">
             <h2 class="klasifikasi-hasil" id="ui-klasifikasi">Menunggu...</h2>
             <span class="skor-teks">Skor kematangan <span class="skor-nilai" id="ui-skor">0.0</span>/100</span>
         </div>

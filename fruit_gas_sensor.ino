@@ -226,7 +226,8 @@ void loop() {
     ArduinoOTA.handle();
     updateWifiLed();
 
-    unsigned long intervalSekarang = isReading ? readIntervalAktif : readIntervalIdle;
+    // Gunakan interval cepat jika Pompa 1 ATAU Pompa 2 menyala agar pergerakan angka di web sama-sama responsif
+    unsigned long intervalSekarang = (pompa1On || pompa2On) ? readIntervalAktif : readIntervalIdle;
     if (millis() - lastReadTime >= intervalSekarang) {
         lastReadTime = millis();
         bacaSensor();

@@ -105,17 +105,19 @@ function computeFuzzyClassification(data) {
     let maxRule = Math.max(ruleMentah, ruleMatang, ruleBusuk);
 
     if (maxRule === 0) {
-        data.klasifikasi = "Analisis Berjalan...";
-        data.skor = 0.0;
+        data.fuzzy_conflict = true;
     } else if (maxRule === ruleMentah) {
         data.klasifikasi = "Mentah";
         data.skor = parseFloat((20 + (maxRule * 20)).toFixed(1)); // Range skor 20% - 40%
+        data.fuzzy_conflict = false;
     } else if (maxRule === ruleMatang) {
         data.klasifikasi = "Matang";
         data.skor = parseFloat((60 + (maxRule * 20)).toFixed(1)); // Range skor 60% - 80%
+        data.fuzzy_conflict = false;
     } else {
         data.klasifikasi = "Busuk";
         data.skor = parseFloat((80 + (maxRule * 20)).toFixed(1)); // Range skor 80% - 100%
+        data.fuzzy_conflict = false;
     }
 }
 
@@ -166,8 +168,17 @@ io.on("connection", (socket) => {
 
         if (data.statusBacaan === "MEMBACA") {
             computeFuzzyClassification(data);
-            skorHitung = data.skor || 0.0;
-            teksKlasifikasi = data.klasifikasi || "Analisis Berjalan...";
+            
+            if (data.fuzzy_conflict) {
+                // Tahan nilai sebelumnya jika transisi sensor sedang silang (tidak drop ke 0)
+                skorHitung = lastData.skor > 0 ? lastData.skor : 0.0;
+                teksKlasifikasi = (lastData.klasifikasi && lastData.klasifikasi !== "Standby (Terhubung)" && lastData.klasifikasi !== "Menunggu Koneksi...") 
+                                    ? lastData.klasifikasi 
+                                    : "Menganalisis...";
+            } else {
+                skorHitung = data.skor;
+                teksKlasifikasi = data.klasifikasi;
+            }
         }
 
         lastData = { 
