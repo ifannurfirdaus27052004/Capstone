@@ -8,10 +8,10 @@ RUN npm install --omit=dev
 
 # Salin source code & file statis dashboard
 COPY server.js ./
-COPY index.html ./
+COPY public ./public
 
-EXPOSE 4000
+EXPOSE 3000
 
-ENV PORT=4000
+ENV PORT=3000
 
 CMD ["node", "server.js"]

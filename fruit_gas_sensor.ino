@@ -3,16 +3,17 @@
 #include <Preferences.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-#include <ArduinoOTA.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 #include "ota_config.h"
 
 // =================================================================
 // KONFIGURASI SERVER CASAOS
 // =================================================================
-const int WS_HOST_MAX = 64;
-char ws_host[WS_HOST_MAX];
+String ws_host = String(default_ws_host);
 int ws_port = default_ws_port;
+bool use_ssl = default_use_ssl;
 
 // ======================
 // PIN SENSOR GAS
@@ -20,7 +21,7 @@ int ws_port = default_ws_port;
 #define MQ2_PIN     35
 #define MQ3_PIN     34
 #define MQ5_PIN     32
-#define TGS2602_PIN 33
+#define TGS2602_PIN 25
 
 // ======================
 // PIN RELAY
@@ -37,9 +38,11 @@ WiFiManager wm;
 // STATE VARIABLES & TELEMETRI
 // =================================================================
 int rawMQ2 = 0, rawMQ3 = 0, rawMQ5 = 0, rawTGS = 0;
-bool pompa1On = false;
-bool pompa2On = false;
-bool isReading = false;
+
+String pompa1Status = "OFF", pompa2Status = "OFF";
+
+// Status proses pembacaan: "IDLE" (belum/sudah selesai), "MEMBACA" (pompa 1 aktif)
+String statusBacaan = "IDLE";
 
 unsigned long lastReadTime = 0;
 const unsigned long readIntervalIdle = 2000;    // saat idle, cukup kirim status tiap 2 detik
@@ -49,11 +52,6 @@ bool socketIoReady = false;
 
 bool pendingRestart = false;
 unsigned long restartTime = 0;
-
-// WiFi Reset Timeout: 10 detik untuk reconnect, jika gagal masuk AP mode
-bool wifiResetPending = false;
-unsigned long wifiResetStartTime = 0;
-const unsigned long WIFI_RECONNECT_TIMEOUT = 10000; // 10 detik
 
 // =================================================================
 // KONTROL POMPA (MANUAL DARI DASHBOARD, SALING EXCLUSIVE)
@@ -66,18 +64,18 @@ void setPompa1(bool stateON) {
     if (stateON) {
         // Pastikan pompa 2 mati dulu sebelum pompa 1 menyala
         digitalWrite(RELAY2, HIGH); // OFF (active LOW)
-        pompa2On = false;
+        pompa2Status = "OFF";
 
         digitalWrite(RELAY1, LOW); // ON (active LOW)
-        pompa1On = true;
+        pompa1Status = "ON";
 
-        isReading = true;
+        statusBacaan = "MEMBACA";
     } else {
         digitalWrite(RELAY1, HIGH); // OFF
-        pompa1On = false;
+        pompa1Status = "OFF";
 
         // Pembacaan berhenti, hasil klasifikasi terakhir tetap ditampilkan
-        isReading = false;
+        statusBacaan = "IDLE";
     }
 }
 
@@ -85,14 +83,14 @@ void setPompa2(bool stateON) {
     if (stateON) {
         // Pastikan pompa 1 mati dulu sebelum pompa 2 menyala
         digitalWrite(RELAY1, HIGH); // OFF (active LOW)
-        pompa1On = false;
-        isReading = false;
+        pompa1Status = "OFF";
+        statusBacaan = "IDLE";
 
         digitalWrite(RELAY2, LOW); // ON (active LOW)
-        pompa2On = true;
+        pompa2Status = "ON";
     } else {
         digitalWrite(RELAY2, HIGH); // OFF
-        pompa2On = false;
+        pompa2Status = "OFF";
     }
 }
 
@@ -117,175 +115,94 @@ void bacaSensor() {
 // =================================================================
 // OTA & RESTART
 // =================================================================
+void jalankanOTA() {
+    Serial.println("\n[OTA] Mengunduh Firmware...");
+    String otaURL = String(use_ssl ? "https://" : "http://") + ws_host + ":" + ws_port + "/firmware.bin";
+    t_httpUpdate_return ret;
+
+    if (use_ssl) {
+        WiFiClientSecure clientS; clientS.setInsecure();
+        ret = httpUpdate.update(clientS, otaURL);
+    } else {
+        WiFiClient client; ret = httpUpdate.update(client, otaURL);
+    }
+    if (ret == HTTP_UPDATE_OK) {
+        pendingRestart = true;
+        restartTime = millis();
+    }
+}
+
 void triggerRestart() {
     pendingRestart = true;
     restartTime = millis();
 }
 
-void setupArduinoOTA() {
-    ArduinoOTA.setHostname("fruitmaturity-esp32");
-    ArduinoOTA.setPassword("buahpintar123");
-
-    ArduinoOTA.onStart([]() {
-        Serial.println("OTA: Start");
-    });
-    ArduinoOTA.onEnd([]() {
-        Serial.println("\nOTA: End");
-    });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("OTA: Progress: %u%%\r", (progress / (total / 100)));
-    });
-    ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("OTA Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-        else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    });
-    ArduinoOTA.begin();
-    Serial.println("OTA: Ready");
-}
-
-void setupWebSocketSSL() {
-    // Configure SSL certificate validation
-    // For self-signed certificates or testing, disable validation
-    // Production: implement proper certificate pinning
-    
-    // The WebSocketsClient will use WiFiClientSecure internally
-    // We set insecure mode to skip certificate validation during testing
-    Serial.println("[SSL] Configuring SSL for WebSocket (certificate validation: disabled for testing)");
-}
-
 // =================================================================
-// WEBSOCKET / SOCKET.IO EVENT HANDLER (menggunakan ArduinoJson)
+// WEBSOCKET / SOCKET.IO EVENT HANDLER
 // =================================================================
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
-    Serial.printf("[WS] Event: type=%d, length=%d\n", type, length);
-    
-    if (type == WStype_DISCONNECTED) {
-        socketIoReady = false;
-        Serial.println("[WS] Disconnected");
-        return;
-    }
-    
-    if (type == WStype_CONNECTED) {
-        Serial.printf("[WS] Connected to %s:%d\n", ws_host, ws_port);
-        return;
-    }
-    
-    if (type == WStype_ERROR) {
-        Serial.printf("[WS] ERROR: %s\n", payload ? (char*)payload : "unknown");
-        return;
-    }
-    
-    if (type != WStype_TEXT || length == 0) {
-        Serial.printf("[WS] Ignored non-TEXT or zero-length: type=%d\n", type);
-        return;
-    }
+    if (type == WStype_DISCONNECTED) { socketIoReady = false; }
+    else if (type == WStype_TEXT) {
+        String msg = (char*)payload;
+        if (msg.startsWith("0")) { webSocket.sendTXT("40"); socketIoReady = true; return; }
+        if (msg == "2") { webSocket.sendTXT("3"); return; }
 
-    String msg = String((char*)payload);
-    Serial.printf("[WS] RX (%d bytes): %s\n", length, msg.c_str());
+        if (msg.startsWith("42")) {
+            msg.remove(0, 2); JsonDocument doc;
+            if (!deserializeJson(doc, msg)) {
+                if (doc[0].as<String>() == "serverToEsp") {
+                    String cmd = doc[1]["cmd"].as<String>();
 
-    // Socket.IO Handshake: "0" → respond "40"
-    if (msg.startsWith("0")) {
-        webSocket.sendTXT("40");
-        socketIoReady = true;
-        Serial.println("[WS] ✓ Socket.IO handshake completed");
-        return;
-    }
-
-    // Socket.IO Keepalive: "2" → respond "3"
-    if (msg == "2") {
-        webSocket.sendTXT("3");
-        return;
-    }
-
-    // Socket.IO Event frame: "42" prefix = event message
-    if (!msg.startsWith("42")) {
-        Serial.printf("[WS] Frame type not 42: %s\n", msg.substring(0, 5).c_str());
-        return;
-    }
-
-    msg.remove(0, 2);  // Remove "42" prefix
-    Serial.printf("[WS] After remove prefix: %s\n", msg.c_str());
-
-    JsonDocument doc;
-    if (deserializeJson(doc, msg)) {
-        Serial.printf("[WS] JSON parse failed! Input: %s\n", msg.c_str());
-        return;
-    }
-
-    // Check event name: serverToEsp
-    if (doc[0].as<String>() != "serverToEsp") {
-        Serial.printf("[WS] Event bukan serverToEsp: %s\n", doc[0].as<String>().c_str());
-        return;
-    }
-
-    // doc[1] contains the command payload
-    String cmd = doc[1]["cmd"].as<String>();
-    Serial.printf("[WS] ✓ CMD received: %s\n", cmd.c_str());
-
-    if (cmd == "setPompa1") {
-        bool state = doc[1]["data"]["state"] | false;
-        setPompa1(state);
-        Serial.printf("[WS] setPompa1 → %s\n", state ? "ON" : "OFF");
-    }
-    else if (cmd == "setPompa2") {
-        bool state = doc[1]["data"]["state"] | false;
-        setPompa2(state);
-        Serial.printf("[WS] setPompa2 → %s\n", state ? "ON" : "OFF");
-    }
-    else if (cmd == "setAllOff") {
-        semuaPompaOff();
-        Serial.println("[WS] setAllOff executed");
-    }
-    else if (cmd == "applyNetwork") {
-        String ip = doc[1]["data"]["ip"].as<String>();
-        String gw = doc[1]["data"]["gw"].as<String>();
-        if (ip.length() > 0) {
-            preferences.putString("statIp", ip);
-            preferences.putString("statGw", gw);
-            Serial.printf("[NETWORK] Konfigurasi Baru Disimpan: IP=%s GW=%s. Memicu Restart...\n", ip.c_str(), gw.c_str());
-            triggerRestart();
+                    if (cmd == "setPompa1") {
+                        bool state = doc[1]["data"]["state"].as<bool>();
+                        setPompa1(state);
+                    }
+                    else if (cmd == "setPompa2") {
+                        bool state = doc[1]["data"]["state"].as<bool>();
+                        setPompa2(state);
+                    }
+                    else if (cmd == "setAllOff") {
+                        semuaPompaOff();
+                    }
+                    else if (cmd == "applyNetwork") {
+                        preferences.putString("statIp", doc[1]["data"]["ip"].as<String>());
+                        preferences.putString("statGw", doc[1]["data"]["gw"].as<String>());
+                        Serial.println("[NETWORK] Konfigurasi Baru Disimpan. Memicu Restart...");
+                        triggerRestart();
+                    }
+                    else if (cmd == "startOta") { jalankanOTA(); }
+                    else if (cmd == "resetWifi") {
+                        wm.resetSettings();
+                        preferences.remove("statIp");
+                        Serial.println("[NETWORK] Memori Jaringan Dibersihkan. Memicu Restart...");
+                        triggerRestart();
+                    }
+                }
+            }
         }
-    }
-    else if (cmd == "resetWifi") {
-        Serial.println("[NETWORK] Perintah reset WiFi diterima. Siap reconnect dalam 10 detik...");
-        wm.resetSettings();
-        preferences.remove("statIp");
-        preferences.remove("statGw");
-        wifiResetPending = true;
-        wifiResetStartTime = millis();
-        Serial.println("[NETWORK] Memulai proses reconnect WiFi dengan timeout 10 detik");
     }
 }
 
 // =================================================================
-// KIRIM DATA TELEMETRI KE SERVER (menggunakan ArduinoJson)
+// KIRIM DATA TELEMETRI KE SERVER
 // =================================================================
 void kirimDataKeServer() {
-    if (!socketIoReady) {
-        Serial.println("[WS] Socket.IO not ready, skip send");
-        return;
-    }
-
+    if (!socketIoReady) return;
     JsonDocument doc;
+
+    // Data mentah dikirim ke server untuk diproses fuzzy logic di sisi server.
     doc["mq2_raw"] = rawMQ2;
     doc["mq3_raw"] = rawMQ3;
     doc["mq5_raw"] = rawMQ5;
     doc["tgs_raw"] = rawTGS;
-    doc["statusBacaan"] = isReading ? "MEMBACA" : "IDLE";
-    doc["pompa1"] = pompa1On ? "ON" : "OFF";
-    doc["pompa2"] = pompa2On ? "ON" : "OFF";
 
-    String jsonData;
-    serializeJson(doc, jsonData);
-    
-    String frame = "42[\"espData\"," + jsonData + "]";
-    webSocket.sendTXT(frame);
-    
-    Serial.printf("[WS] Sent espData: %s\n", jsonData.c_str());
+    // Status pembacaan & kontrol pompa
+    doc["statusBacaan"] = statusBacaan; // "IDLE" atau "MEMBACA"
+    doc["pompa1"] = pompa1Status;
+    doc["pompa2"] = pompa2Status;
+
+    String jsonData; serializeJson(doc, jsonData);
+    webSocket.sendTXT("42[\"espData\"," + jsonData + "]");
 }
 
 // =================================================================
@@ -300,14 +217,12 @@ void setup() {
     digitalWrite(RELAY2, HIGH); // OFF (active LOW)
 
     pinMode(LED_WIFI, OUTPUT);
-    digitalWrite(LED_WIFI, HIGH); // Matikan LED saat belum terhubung
 
     preferences.begin("fruit-app", false);
 
-    String savedHost = preferences.getString("ws_host", default_ws_host);
-    strncpy(ws_host, savedHost.c_str(), WS_HOST_MAX);
-    ws_host[WS_HOST_MAX - 1] = '\0';
+    ws_host = preferences.getString("ws_host", ws_host);
     ws_port = preferences.getInt("ws_port", ws_port);
+    use_ssl = preferences.getBool("use_ssl", use_ssl);
 
     String statIp = preferences.getString("statIp", "");
     String statGw = preferences.getString("statGw", "");
@@ -319,49 +234,46 @@ void setup() {
         wm.setSTAStaticIPConfig(ip, gw, sn);
     }
 
+    char hostBuf[64];
     char portBuf[6];
+    char sslBuf[2];
+    ws_host.toCharArray(hostBuf, sizeof(hostBuf));
     snprintf(portBuf, sizeof(portBuf), "%d", ws_port);
+    snprintf(sslBuf, sizeof(sslBuf), "%d", use_ssl ? 1 : 0);
 
-    WiFiManagerParameter otaHostParam("host", "OTA Host", ws_host, sizeof(ws_host));
+    WiFiManagerParameter otaHostParam("host", "OTA Host", hostBuf, sizeof(hostBuf));
     WiFiManagerParameter otaPortParam("port", "OTA Port", portBuf, sizeof(portBuf));
+    WiFiManagerParameter otaSslParam("ssl", "Use SSL (0=off,1=on)", sslBuf, sizeof(sslBuf));
     wm.addParameter(&otaHostParam);
     wm.addParameter(&otaPortParam);
+    wm.addParameter(&otaSslParam);
 
     wm.autoConnect("FruitSensor_AP");
     digitalWrite(LED_WIFI, HIGH);
 
     String newHost = otaHostParam.getValue();
     int newPort = atoi(otaPortParam.getValue());
+    bool newSsl = otaSslParam.getValue()[0] == '1';
 
-    if (newHost.length() > 0) {
-        strncpy(ws_host, newHost.c_str(), WS_HOST_MAX);
-        ws_host[WS_HOST_MAX - 1] = '\0';
+    if (newHost.length() > 0 && newHost != ws_host) {
+        ws_host = newHost;
         preferences.putString("ws_host", ws_host);
     }
     if (newPort > 0 && newPort != ws_port) {
         ws_port = newPort;
         preferences.putInt("ws_port", ws_port);
     }
+    if (newSsl != use_ssl) {
+        use_ssl = newSsl;
+        preferences.putBool("use_ssl", use_ssl);
+    }
 
-    // REGISTER CALLBACK FIRST, then begin connection (WebSocketsClient requirement)
+    String socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
+    if (use_ssl) webSocket.beginSSL(ws_host.c_str(), ws_port, socketIoUrl.c_str());
+    else webSocket.begin(ws_host.c_str(), ws_port, socketIoUrl.c_str());
+
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(3000);
-
-    const char* socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
-    
-    // Perbaikan Logika SSL:
-    // Jika port 443 ATAU menggunakan domain ijuloss.my.id, paksa gunakan SSL dan port 443.
-    if (ws_port == 443 || strstr(ws_host, "ijuloss.my.id")) {
-        Serial.println("[WS] Menggunakan koneksi SSL (via Reverse Proxy)");
-        // Override port ke 443 jika user salah memasukkan port 4000 di captive portal
-        ws_port = 443; 
-        webSocket.beginSSL(ws_host, ws_port, socketIoUrl);
-    } else {
-        Serial.printf("[WS] Menggunakan HTTP biasa ke port %d\n", ws_port);
-        webSocket.begin(ws_host, ws_port, socketIoUrl);
-    }
-    
-    setupArduinoOTA();
 
     delay(2000); // Stabilisasi awal sensor gas (analog dgn kode asli)
 }
@@ -369,74 +281,26 @@ void setup() {
 // =================================================================
 // LOOP
 // =================================================================
-void updateWifiLed() {
-    if (WiFi.status() == WL_CONNECTED) {
-        digitalWrite(LED_WIFI, LOW); // LED onboard biru menyala
-    } else {
-        digitalWrite(LED_WIFI, HIGH); // LED dimatikan
-    }
-}
-
-void handleWifiResetTimeout() {
-    if (!wifiResetPending) return;
-
-    unsigned long elapsedTime = millis() - wifiResetStartTime;
-
-    // Coba reconnect jika dalam 10 detik
-    if (elapsedTime < WIFI_RECONNECT_TIMEOUT) {
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("[NETWORK] ✓ WiFi berhasil terhubung dalam timeout!");
-            wifiResetPending = false;
-            // Reconnect ke WebSocket
-            webSocket.disconnect();
-            delay(500);
-            const char* socketIoUrl = "/socket.io/?EIO=4&transport=websocket";
-            if (ws_port == 443 || strstr(ws_host, "ijuloss.my.id")) {
-                webSocket.beginSSL(ws_host, ws_port, socketIoUrl);
-            } else {
-                webSocket.begin(ws_host, ws_port, socketIoUrl);
-            }
-        }
-    } else {
-        // Sudah 10 detik, jika masih belum terhubung, masuk AP mode
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[NETWORK] ⚠ Timeout 10 detik tercapai. Tidak bisa terhubung ke WiFi. Masuk mode Access Point...");
-            wifiResetPending = false;
-            // Mulai WiFiManager portal
-            wm.startConfigPortal("FruitSensor_AP");
-        } else {
-            // Sudah terhubung, stop timer
-            wifiResetPending = false;
-        }
-    }
-}
-
 void loop() {
     // Penanganan Restart Tertunda Tanpa Fungsi Blocking Delay
     if (pendingRestart && (millis() - restartTime >= 1000)) {
         ESP.restart();
     }
 
-    // Handle WiFi reset dengan timeout 10 detik
-    handleWifiResetTimeout();
+    webSocket.loop();
 
-    webSocket.loop();  // CRITICAL: call frequently for event callbacks
-    ArduinoOTA.handle();  // OTA must loop continuously
-    updateWifiLed();
-
-    unsigned long intervalSekarang = isReading ? readIntervalAktif : readIntervalIdle;
+    unsigned long intervalSekarang = (statusBacaan == "MEMBACA") ? readIntervalAktif : readIntervalIdle;
 
     if (millis() - lastReadTime >= intervalSekarang) {
         lastReadTime = millis();
         bacaSensor();
 
         // Output ke Serial Plotter (tetap dipertahankan untuk debugging lokal)
-        const char* status = isReading ? "MEMBACA" : "IDLE";
         Serial.print(rawMQ2); Serial.print(",");
         Serial.print(rawMQ3); Serial.print(",");
         Serial.print(rawMQ5); Serial.print(",");
         Serial.print(rawTGS); Serial.print(",");
-        Serial.println(status);
+        Serial.println(statusBacaan);
 
         if (WiFi.status() == WL_CONNECTED) { kirimDataKeServer(); }
     }

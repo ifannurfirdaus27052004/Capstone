@@ -66,7 +66,7 @@ function computeFuzzyClassification(data) {
 
 const PORT = process.env.PORT || 4000;
 
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname, "public")));
 
 // State terakhir in-memory (hilang saat restart, sesuai kebutuhan)
 let lastData = {
@@ -83,28 +83,37 @@ let lastData = {
 io.on("connection", (socket) => {
     console.log(`[CONNECT] Client baru: ${socket.id}`);
 
-    // Mengirim state terakhir (lastData) ke client yang baru terkoneksi [cite: 28, 37]
+    // Kirim state terakhir ke client yang baru connect (browser ataupun ESP32)
     socket.emit("espData", lastData);
 
-    // 1. Menerima data dari ESP32 
+    // ---- DARI ESP32: data telemetri sensor + status pompa ----
     socket.on("espData", (data) => {
-        // Update state in-memory [cite: 28, 37]
-        lastData = { ...lastData, ...data };
-        
-        // Teruskan data ini ke SEMUA client (browser dashboard) [cite: 26]
-        // menggunakan broadcast agar tidak dikirim balik ke ESP32 pengirim
+        const classification = computeFuzzyClassification(data);
+        if (classification) {
+            data.klasifikasi = classification.klasifikasi;
+            data.skor = classification.skor;
+        }
+
+        data.mq2 = data.mq2_raw ?? data.mq2;
+        data.mq3 = data.mq3_raw ?? data.mq3;
+        data.mq5 = data.mq5_raw ?? data.mq5;
+        data.tgs = data.tgs_raw ?? data.tgs;
+
+        lastData = { ...lastData, ...data, connected: true };
+        // Broadcast ke SEMUA client lain (dashboard browser)
         socket.broadcast.emit("espData", lastData);
     });
 
-    // 2. Menerima perintah (command) dari Browser Dashboard [cite: 26]
-    socket.on("dashboardCmd", (cmd) => {
-        console.log(`[CMD] Perintah dari Dashboard:`, cmd);
-        // Teruskan ke semua client sebagai "serverToEsp" (ESP32 akan merespon ini) [cite: 26]
-        io.emit("serverToEsp", cmd);
+    // ---- DARI DASHBOARD BROWSER: command tombol pompa ----
+    // payload: { cmd: "setPompa1", data: { state: true } }
+    socket.on("dashboardCmd", (payload) => {
+        console.log("[CMD] Dari dashboard:", payload);
+        // Teruskan ke semua client (ESP32 akan memprosesnya)
+        io.emit("serverToEsp", payload);
     });
 
     socket.on("disconnect", () => {
-        console.log(`[DISCONNECT] Client terputus: ${socket.id}`);
+        console.log(`[DISCONNECT] Client: ${socket.id}`);
     });
 });
 
