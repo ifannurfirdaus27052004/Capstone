@@ -361,7 +361,20 @@
         }
 
         // 2. Update Klasifikasi
-        document.getElementById('ui-klasifikasi').innerText = data.klasifikasi || "Menunggu...";
+        const uiKlasifikasi = document.getElementById('ui-klasifikasi');
+        uiKlasifikasi.innerText = data.klasifikasi || "Menunggu...";
+        
+        // Sesuaikan warna teks klasifikasi sesuai logika fuzzy
+        if (data.klasifikasi === "Matang") {
+            uiKlasifikasi.style.color = "var(--accent-green)";
+        } else if (data.klasifikasi === "Busuk") {
+            uiKlasifikasi.style.color = "var(--accent-red)";
+        } else if (data.klasifikasi === "Mentah") {
+            uiKlasifikasi.style.color = "#d99b22"; // Warna orange/kekuningan untuk Mentah
+        } else {
+            uiKlasifikasi.style.color = "var(--text-muted)"; // Warna abu-abu untuk Standby/Analisis
+        }
+
         document.getElementById('ui-skor').innerText = data.skor || "0.0";
 
         // 3. Update Sensor Raw

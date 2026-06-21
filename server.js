@@ -32,6 +32,89 @@ function formatUptime(seconds) {
     return `${h}h ${m}m ${s}s`;
 }
 
+// =================================================================
+// 1. FUNGSI DERAJAT KEANGGOTAAN (MEMBERSHIP)
+// =================================================================
+function membershipRendah(x, batasBawah, batasAtas) {
+    if (x <= batasBawah) return 1.0;
+    if (x >= batasAtas) return 0.0;
+    return (batasAtas - x) / (batasAtas - batasBawah);
+}
+
+function membershipSedang(x, batasBawah, batasTengah, batasAtas) {
+    if (x <= batasBawah || x >= batasAtas) return 0.0;
+    if (x > batasBawah && x <= batasTengah) return (x - batasBawah) / (batasTengah - batasBawah);
+    if (x > batasTengah && x < batasAtas) return (batasAtas - x) / (batasAtas - batasTengah);
+    return 0.0;
+}
+
+function membershipTinggi(x, batasBawah, batasAtas) {
+    if (x <= batasBawah) return 0.0;
+    if (x >= batasAtas) return 1.0;
+    return (x - batasBawah) / (batasAtas - batasBawah);
+}
+
+// =================================================================
+// 2. FUNGSI LOGIKA FUZZY UTAMA (BERDASARKAN TABEL KALIBRASI)
+// =================================================================
+function computeFuzzyClassification(data) {
+    // Memastikan kita mengambil nilai RAW yang tepat
+    const mq2 = typeof data.mq2_raw === 'number' ? data.mq2_raw : data.mq2;
+    const mq3 = typeof data.mq3_raw === 'number' ? data.mq3_raw : data.mq3;
+    const mq5 = typeof data.mq5_raw === 'number' ? data.mq5_raw : data.mq5;
+    const tgs = typeof data.tgs_raw === 'number' ? data.tgs_raw : data.tgs;
+
+    // --- TAHAP 1: FUZZIFIKASI (Menerjemahkan angka RAW ke Derajat Fuzzy) ---
+    // Batas nilai diekstrak langsung dari Tabel Data Sensor Anda
+
+    // MQ-2 (Mentah < 1900 | Matang ~2280 | Busuk > 2600)
+    let mq2_rendah = membershipRendah(mq2, 1900, 2100);
+    let mq2_sedang = membershipSedang(mq2, 1900, 2280, 2600);
+    let mq2_tinggi = membershipTinggi(mq2, 2400, 2600);
+
+    // MQ-3 (Mentah < 130 | Matang ~310 | Busuk > 550)
+    let mq3_rendah = membershipRendah(mq3, 130, 200);
+    let mq3_sedang = membershipSedang(mq3, 130, 310, 550);
+    let mq3_tinggi = membershipTinggi(mq3, 450, 550);
+
+    // MQ-5 (Mentah < 470 | Matang ~760 | Busuk > 900)
+    let mq5_rendah = membershipRendah(mq5, 470, 600);
+    let mq5_sedang = membershipSedang(mq5, 470, 760, 900);
+    let mq5_tinggi = membershipTinggi(mq5, 800, 900);
+
+    // TGS2602 (Mentah < 70 | Matang ~150 | Busuk > 280)
+    let tgs_rendah = membershipRendah(tgs, 70, 100);
+    let tgs_sedang = membershipSedang(tgs, 70, 150, 280);
+    let tgs_tinggi = membershipTinggi(tgs, 220, 280);
+
+    // --- TAHAP 2: INFERENSI RULE BASE (Menggunakan Logika AND / Minimal) ---
+    // JIKA semua sensor Rendah, MAKA Mentah
+    let ruleMentah = Math.min(mq2_rendah, mq3_rendah, mq5_rendah, tgs_rendah);
+    
+    // JIKA semua sensor Sedang, MAKA Matang
+    let ruleMatang = Math.min(mq2_sedang, mq3_sedang, mq5_sedang, tgs_sedang);
+    
+    // JIKA semua sensor Tinggi, MAKA Busuk
+    let ruleBusuk  = Math.min(mq2_tinggi, mq3_tinggi, mq5_tinggi, tgs_tinggi);
+
+    // --- TAHAP 3: DEFUZZIFIKASI (Mencari Keputusan Paling Dominan) ---
+    let maxRule = Math.max(ruleMentah, ruleMatang, ruleBusuk);
+
+    if (maxRule === 0) {
+        data.klasifikasi = "Analisis Berjalan...";
+        data.skor = 0.0;
+    } else if (maxRule === ruleMentah) {
+        data.klasifikasi = "Mentah";
+        data.skor = parseFloat((20 + (maxRule * 20)).toFixed(1)); // Range skor 20% - 40%
+    } else if (maxRule === ruleMatang) {
+        data.klasifikasi = "Matang";
+        data.skor = parseFloat((60 + (maxRule * 20)).toFixed(1)); // Range skor 60% - 80%
+    } else {
+        data.klasifikasi = "Busuk";
+        data.skor = parseFloat((80 + (maxRule * 20)).toFixed(1)); // Range skor 80% - 100%
+    }
+}
+
 io.on("connection", (socket) => {
     // Berikan data terakhir untuk Browser yang baru buka halaman
     socket.emit("espData", lastData);
@@ -54,18 +137,15 @@ io.on("connection", (socket) => {
         let teksKlasifikasi = "Standby (Terhubung)";
 
         if (data.statusBacaan === "MEMBACA") {
-            let avgSensor = ((data.mq2_raw || 0) + (data.mq3_raw || 0) + (data.mq5_raw || 0) + (data.tgs_raw || 0)) / 4;
-            skorHitung = Math.min((avgSensor / 4095) * 100, 100);
-            
-            if (skorHitung < 30) teksKlasifikasi = "Mentah";
-            else if (skorHitung < 70) teksKlasifikasi = "Setengah Matang";
-            else teksKlasifikasi = "Matang";
+            computeFuzzyClassification(data);
+            skorHitung = data.skor || 0.0;
+            teksKlasifikasi = data.klasifikasi || "Analisis Berjalan...";
         }
 
         lastData = { 
             ...lastData, 
             ...data, 
-            skor: skorHitung.toFixed(1),
+            skor: Number(skorHitung).toFixed(1),
             klasifikasi: teksKlasifikasi,
             connected: true 
         };
