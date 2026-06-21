@@ -1,17 +1,3 @@
-// =================================================================
-// SERVER: Jembatan Socket.IO antara ESP32 dan Dashboard Browser
-// =================================================================
-// - ESP32 terhubung sebagai satu Socket.IO client biasa, mengirim
-//   event "espData" dan menerima command via event "serverToEsp".
-// - Browser dashboard juga terhubung sebagai Socket.IO client, hanya
-//   menerima broadcast "espData" dan mengirim command lewat event
-//   "dashboardCmd" yang oleh server diteruskan sebagai "serverToEsp"
-//   ke SEMUA client (termasuk ESP32). ESP32 mengabaikan command yang
-//   bukan untuknya secara natural karena hanya memproses cmd dikenal.
-// - Data terakhir disimpan in-memory (tidak ada database), supaya
-//   dashboard yang baru connect langsung dapat state terkini.
-// =================================================================
-
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -21,59 +7,87 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-function membershipRendah(x, batasBawah, batasAtas) {
-    if (x <= batasBawah) return 1.0;
-    if (x >= batasAtas) return 0.0;
-    return (batasAtas - x) / (batasAtas - batasBawah);
-}
-
-function membershipTinggi(x, batasBawah, batasAtas) {
-    if (x <= batasBawah) return 0.0;
-    if (x >= batasAtas) return 1.0;
-    return (x - batasBawah) / (batasAtas - batasBawah);
-}
-
-function computeFuzzyClassification(data) {
-    const mq2 = typeof data.mq2_raw === 'number' ? data.mq2_raw : data.mq2;
-    const mq3 = typeof data.mq3_raw === 'number' ? data.mq3_raw : data.mq3;
-    const mq5 = typeof data.mq5_raw === 'number' ? data.mq5_raw : data.mq5;
-    const tgs = typeof data.tgs_raw === 'number' ? data.tgs_raw : data.tgs;
-    // Logika Fuzzy dapat ditambahkan di dalam blok ini 
-}
-
 const PORT = process.env.PORT || 4000;
 app.use(express.static(path.join(__dirname)));
 
-// State terakhir in-memory (hilang saat restart, sesuai kebutuhan)
-let lastData = {
+// State Default (Offline / Restart)
+const defaultData = {
     mq2_raw: 0, mq3_raw: 0, mq5_raw: 0, tgs_raw: 0,
     mq2: 0, mq3: 0, mq5: 0, tgs: 0,
-    klasifikasi: "Menunggu Data...", skor: 0,
-    statusBacaan: "IDLE", pompa1: "OFF", pompa2: "OFF",
-    connected: false // status koneksi ESP32 ke server
+    klasifikasi: "Menunggu Koneksi...", skor: 0.0,
+    statusBacaan: "OFFLINE", pompa1: "OFF", pompa2: "OFF",
+    connected: false,
+    wifi_ssid: "-", ip_address: "-", rssi: 0, uptime_formatted: "0h 00m 00s", free_heap: 0
 };
 
-io.on("connection", (socket) => {
-    console.log(`[CONNECT] Client baru: ${socket.id}`);
+let lastData = { ...defaultData };
+let espSocketId = null; // Menyimpan ID spesifik milik ESP32
 
-    // Mengirim state terakhir ke client dashboard yang baru connect
+// Fungsi mengubah detik menjadi format "0h 00m 00s"
+function formatUptime(seconds) {
+    if (!seconds) return "0h 00m 00s";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return `${h}h ${m}m ${s}s`;
+}
+
+io.on("connection", (socket) => {
+    // Berikan data terakhir untuk Browser yang baru buka halaman
     socket.emit("espData", lastData);
 
-    // Menerima data telemetri dari ESP32
+    // Menerima data dari ESP32
     socket.on("espData", (data) => {
-        lastData = { ...lastData, ...data, connected: true };
-        // Broadcast data ke seluruh browser dashboard yang terkoneksi
+        // Tandai bahwa socket ini adalah milik ESP32
+        espSocketId = socket.id;
+
+        // Duplikasi untuk UI
+        data.mq2 = data.mq2_raw;
+        data.mq3 = data.mq3_raw;
+        data.mq5 = data.mq5_raw;
+        data.tgs = data.tgs_raw;
+        
+        // Format Metrik Sistem
+        data.uptime_formatted = formatUptime(data.uptime_sec);
+
+        let skorHitung = 0.0;
+        let teksKlasifikasi = "Standby (Terhubung)";
+
+        if (data.statusBacaan === "MEMBACA") {
+            let avgSensor = ((data.mq2_raw || 0) + (data.mq3_raw || 0) + (data.mq5_raw || 0) + (data.tgs_raw || 0)) / 4;
+            skorHitung = Math.min((avgSensor / 4095) * 100, 100);
+            
+            if (skorHitung < 30) teksKlasifikasi = "Mentah";
+            else if (skorHitung < 70) teksKlasifikasi = "Setengah Matang";
+            else teksKlasifikasi = "Matang";
+        }
+
+        lastData = { 
+            ...lastData, 
+            ...data, 
+            skor: skorHitung.toFixed(1),
+            klasifikasi: teksKlasifikasi,
+            connected: true 
+        };
+
+        // Broadcast ke semua browser
         io.emit("espData", lastData);
     });
 
-    // Menerima perintah kendali dari Dashboard (seperti kontrol pompa)
-    // dan meneruskannya ke ESP32 sebagai instruksi "serverToEsp"
+    // Menerima perintah dari Dashboard
     socket.on("dashboardCmd", (cmdData) => {
         io.emit("serverToEsp", cmdData);
     });
 
+    // Deteksi jika Client / ESP Terputus
     socket.on("disconnect", () => {
-        console.log(`[DISCONNECT] Client terputus: ${socket.id}`);
+        // Jika yang terputus adalah ESP32, set status menjadi Offline
+        if (socket.id === espSocketId) {
+            console.log("[SERVER] ESP32 Terputus!");
+            espSocketId = null;
+            lastData = { ...defaultData }; // Reset ke status awal
+            io.emit("espData", lastData); // Paksa UI kembali ke status offline
+        }
     });
 });
 

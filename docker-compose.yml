@@ -1,14 +1,39 @@
+name: capstone
 services:
-  smart-fruit:
-    build: .
-    image: smart-fruit:latest
-    container_name: smart-fruit
-    restart: unless-stopped
-    ports:
-      # Ubah "4000" di sisi kiri jika port 4000 di host sudah dipakai
-      - "4000:4000"
-    environment:
-      - PORT=4000
-    # Jika reverse proxy CasaOS (mis. Nginx Proxy Manager) sudah menangani
-    # domain fruitmaturity.ijuloss.my.id dan SSL, arahkan proxy tersebut ke
-    # container ini di port 4000. Tidak perlu konfigurasi SSL di sini.
+    smart-fruit:
+        build:
+            context: /DATA/AppData/Fruit/Capstone
+            dockerfile: Dockerfile
+        cpu_shares: 90
+        command: []
+        container_name: smart-fruit
+        deploy:
+            resources:
+                limits:
+                    memory: "10308550656"
+        environment:
+            PORT: "4000"
+        hostname: smart-fruit
+        image: smart-fruit:latest
+        networks:
+            default: null
+        ports:
+            - mode: ingress
+              target: 4000
+              published: "4000"
+              protocol: tcp
+        restart: unless-stopped
+networks:
+    default:
+        name: capstone_default
+x-casaos:
+    author: self
+    category: self
+    hostname: ""
+    icon: ""
+    index: /
+    is_uncontrolled: false
+    port_map: "4000"
+    scheme: http
+    title:
+        custom: Fruit Maturity
